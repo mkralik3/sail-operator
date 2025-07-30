@@ -26,6 +26,7 @@ import (
 
 	"github.com/istio-ecosystem/sail-operator/pkg/kube"
 	. "github.com/istio-ecosystem/sail-operator/pkg/test/util/ginkgo"
+	"github.com/istio-ecosystem/sail-operator/tests/e2e/util/cleaner"
 	"github.com/istio-ecosystem/sail-operator/tests/e2e/util/common"
 	. "github.com/istio-ecosystem/sail-operator/tests/e2e/util/gomega"
 	. "github.com/onsi/ginkgo/v2"
@@ -55,11 +56,17 @@ var sailCRDs = []string{
 	"workloadgroups.networking.istio.io",
 }
 
-var _ = Describe("Operator", Label("smoke", "operator"), Ordered, func() {
+var _ = Describe("Operator", Label("smoke", "operator"), Ordered, func() {	
 	SetDefaultEventuallyTimeout(180 * time.Second)
 	SetDefaultEventuallyPollingInterval(time.Second)
 
 	Describe("installation", func() {
+
+		clr := cleaner.New(cl)
+			BeforeAll(func(ctx SpecContext) {
+			clr.Record(ctx)
+		})
+
 		It("deploys all the CRDs", func(ctx SpecContext) {
 			Eventually(common.GetList).WithArguments(ctx, cl, &apiextensionsv1.CustomResourceDefinitionList{}).
 				Should(WithTransform(extractCRDNames, ContainElements(sailCRDs)),
@@ -182,6 +189,7 @@ spec:
 			if CurrentSpecReport().Failed() {
 				common.LogDebugInfo(common.Operator, k)
 			}
+			clr.Cleanup(ctx)
 		})
 	})
 
