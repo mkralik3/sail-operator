@@ -94,7 +94,7 @@ var _ = Describe("Operator", Label("smoke", "operator"), Ordered, func() {
 		})
 
 		It("serves metrics securely", func(ctx SpecContext) {
-			metricsReaderRoleName := "sailoperator-metrics-reader"
+			metricsReaderRoleName := "servicemeshoperator3-metrics-reader"
 			metricsServiceName := deploymentName + "-metrics-service"
 
 			By("creating a ClusterRoleBinding for the service account to allow access to metrics")
