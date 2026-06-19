@@ -305,7 +305,7 @@ cleanup() {
   set +e
 
   # Unpause worker MachineConfigPool if we paused it
-  unpause_worker_mcp
+  # unpause_worker_mcp
 
   if [ "${OLM}" != "true" ] && [ "${SKIP_DEPLOY}" != "true" ] && [ "${SKIP_CLEANUP}" != "true" ]; then
     if [ "${MULTICLUSTER}" == true ]; then
@@ -420,7 +420,7 @@ check_cluster_operators
 
 # Pause worker MachineConfigPool to prevent node drains during tests
 # This is necessary because certificate rotation triggers MachineConfig updates ~50-60 min after cluster creation
-pause_worker_mcp
+# pause_worker_mcp
 
 set +e
 # Disable to avoid failing the test run before generating the report.xml
