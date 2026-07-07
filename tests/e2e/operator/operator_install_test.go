@@ -250,7 +250,7 @@ spec:
 			// TLSAdherence is behind a TechPreview feature gate.
 			// Enable it via CustomNoUpgrade so the TLSAdherence field is available on the APIServer CRD.
 			// On OCP < 4.22, the TLSAdherence tests are skipped entirely.
-			if ocpMinorVersion >= 22 {
+			if ocpMajorVersion == 4 && ocpMinorVersion > 21 {
 				featureGate := &configv1.FeatureGate{}
 				err = cl.Get(ctx, client.ObjectKey{Name: "cluster"}, featureGate)
 				Expect(err).NotTo(HaveOccurred(), "Failed to get FeatureGate")
