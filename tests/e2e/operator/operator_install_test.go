@@ -249,6 +249,7 @@ spec:
 			Expect(err).NotTo(HaveOccurred(), "Failed to get ClusterVersion")
 			ocpVersion, err = semver.NewVersion(cv.Status.Desired.Version)
 			Expect(err).NotTo(HaveOccurred(), "Failed to parse ClusterVersion %q", cv.Status.Desired.Version)
+			Log(fmt.Sprintf("Detected OpenShift version: %s", ocpVersion))
 
 			// TLSAdherence is behind a TechPreview feature gate on OCP 4.22+.
 			// Enable it via CustomNoUpgrade only when TLSAdherence is still listed in the
@@ -256,14 +257,22 @@ spec:
 			// is GA, it is no longer present in FeatureGate status and can be configured
 			// directly on the APIServer resource.
 			if ocpVersion.GreaterThanEqual(semver.MustParse("4.22.0")) {
+				Log(fmt.Sprintf("OpenShift %s is >= 4.22; checking whether TLSAdherence is controlled by a FeatureGate", ocpVersion))
+
 				featureGate := &configv1.FeatureGate{}
 				err = cl.Get(ctx, client.ObjectKey{Name: "cluster"}, featureGate)
 				Expect(err).NotTo(HaveOccurred(), "Failed to get FeatureGate")
+				Log("Retrieved cluster FeatureGate resource")
 
 				// TLSAdherence is GA on OCP 5.0+ and is no longer listed in FeatureGate
 				// status; only attempt to enable the gate when it is still a gated feature.
 				if featureGateHasTLSAdherence(featureGate) {
-					if !tlsAdherenceFeatureGateEnabled(featureGate) {
+					Log("TLSAdherence is listed in the cluster FeatureGate resource")
+
+					if tlsAdherenceFeatureGateEnabled(featureGate) {
+						Log("TLSAdherence feature gate is already enabled; no FeatureGate changes needed")
+					} else {
+						Log("TLSAdherence feature gate is present but not enabled; enabling it")
 						Step("Enabling TLSAdherence feature gate")
 						featureGate.Spec.FeatureSet = configv1.CustomNoUpgrade
 						featureGate.Spec.CustomNoUpgrade = &configv1.CustomFeatureGates{
@@ -299,6 +308,8 @@ spec:
 				} else {
 					Log(fmt.Sprintf("TLSAdherence is not listed in FeatureGate on OpenShift %s; assuming it is a GA feature", ocpVersion))
 				}
+			} else {
+				Log(fmt.Sprintf("OpenShift %s is below 4.22; skipping TLSAdherence FeatureGate setup", ocpVersion))
 			}
 
 			Step("Saving the original APIServer TLS settings")
@@ -374,8 +385,10 @@ spec:
 		// apply the TLS profile to both the metrics endpoint and the Istio resource.
 		It("syncs TLS settings when TLSAdherence is set to StrictAllComponents", func(ctx SpecContext) {
 			if !ocpVersion.GreaterThanEqual(semver.MustParse("4.22.0")) {
+				Log(fmt.Sprintf("OpenShift %s is below 4.22; skipping TLSAdherence sync test", ocpVersion))
 				Skip(fmt.Sprintf("TLSAdherence field requires OpenShift >= 4.22. Current version: '%s'. Skipping test.", ocpVersion))
 			}
+			Log(fmt.Sprintf("OpenShift %s supports TLSAdherence; running StrictAllComponents sync test", ocpVersion))
 
 			Step("Clearing TLS profile")
 			apiServer := &configv1.APIServer{}
