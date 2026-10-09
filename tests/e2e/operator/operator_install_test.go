@@ -220,9 +220,21 @@ spec:
 			ztunnelNamespace = "network-policy-defaults-ztunnel"
 		)
 
+		// Calling Skip() from a BeforeAll makes Ginkgo defer the enclosing Ordered container's
+		// teardown into the next top-level container, or drop it entirely. The teardown below
+		// would then delete resources belonging to whichever suite is running by then. So the
+		// checks record why the specs cannot run and return, and the spec skips itself.
+		var skipReason string
+		skipIfUnsupported := func() {
+			if skipReason != "" {
+				Skip(skipReason)
+			}
+		}
+
 		BeforeAll(func(ctx SpecContext) {
 			if !env.GetBool("OCP", false) {
-				Skip("Skipping OCP 5 NetworkPolicy defaults test on non-OpenShift cluster")
+				skipReason = "Skipping OCP 5 NetworkPolicy defaults test on non-OpenShift cluster"
+				return
 			}
 
 			cv := &configv1.ClusterVersion{}
@@ -231,7 +243,8 @@ spec:
 			_, err := fmt.Sscanf(cv.Status.Desired.Version, "%d.", &major)
 			Expect(err).NotTo(HaveOccurred(), "Failed to parse OpenShift version %q", cv.Status.Desired.Version)
 			if major < 5 {
-				Skip(fmt.Sprintf("Skipping OCP 5 NetworkPolicy defaults test on OpenShift %s", cv.Status.Desired.Version))
+				skipReason = fmt.Sprintf("Skipping OCP 5 NetworkPolicy defaults test on OpenShift %s", cv.Status.Desired.Version)
+				return
 			}
 
 			for _, namespace := range []string{istioNamespace, cniNamespace, ztunnelNamespace} {
@@ -239,7 +252,28 @@ spec:
 			}
 		})
 
+		// The Istio, IstioCNI and ZTunnel created here are cluster-scoped and IstioCNI and ZTunnel
+		// must be named "default", so leaving them behind makes every later container that creates
+		// those resources fail with AlreadyExists.
+		AfterAll(func(ctx SpecContext) {
+			if skipReason != "" {
+				return
+			}
+
+			resources := []client.Object{
+				&v1.ZTunnel{ObjectMeta: metav1.ObjectMeta{Name: "default"}},
+				&v1.IstioCNI{ObjectMeta: metav1.ObjectMeta{Name: "default"}},
+				&v1.Istio{ObjectMeta: metav1.ObjectMeta{Name: "network-policy-defaults"}},
+			}
+			for _, resource := range resources {
+				Expect(client.IgnoreNotFound(cl.Delete(ctx, resource))).To(Succeed())
+			}
+			common.WaitForDeletion(ctx, cl, resources...)
+		})
+
 		It("enables NetworkPolicies for fresh installs and preserves an existing disabled release", func(ctx SpecContext) {
+			skipIfUnsupported()
+
 			Expect(cl.Create(ctx, &v1.Istio{
 				ObjectMeta: metav1.ObjectMeta{Name: "network-policy-defaults"},
 				Spec:       v1.IstioSpec{Version: istioversion.Default, Namespace: istioNamespace},
