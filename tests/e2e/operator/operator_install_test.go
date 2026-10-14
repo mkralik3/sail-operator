@@ -620,6 +620,22 @@ spec:
 			Expect(k.WithNamespace(tlsTestNamespace).ApplyKustomize("sleep")).To(Succeed(),
 				"Failed to deploy sleep workload")
 
+			// If no pod is ever created, the sidecar-injection webhook is most likely
+			// rejecting the pod, and the bare assertion failure says nothing about why.
+			// Registered after the namespace cleanup above, so it runs before it.
+			DeferCleanup(func() {
+				if !CurrentSpecReport().Failed() {
+					return
+				}
+				kns := k.WithNamespace(tlsTestNamespace)
+				if events, err := kns.GetEvents(); err == nil {
+					Log(fmt.Sprintf("Events in %s:\n%s", tlsTestNamespace, events))
+				}
+				if desc, err := kns.Describe("deployment", "sleep"); err == nil {
+					Log(fmt.Sprintf("Deployment/sleep in %s:\n%s", tlsTestNamespace, desc))
+				}
+			})
+
 			Eventually(func() error {
 				return common.CheckPodsReady(ctx, cl, tlsTestNamespace)
 			}).WithTimeout(5*time.Minute).WithPolling(5*time.Second).Should(Succeed(),
