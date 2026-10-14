@@ -26,6 +26,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 var (
@@ -51,6 +52,10 @@ func TestOperator(t *testing.T) {
 
 func setup() {
 	GinkgoWriter.Println("************ Running Setup ************")
+
+	// Without a logger, controller-runtime swallows API server warning headers
+	// (e.g. pruned fields) and prints a bare stack trace instead.
+	logf.SetLogger(GinkgoLogr)
 
 	GinkgoWriter.Println("Initializing k8s client")
 	var err error

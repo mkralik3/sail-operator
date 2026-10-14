@@ -323,6 +323,18 @@ spec:
 				return
 			}
 
+			// Each kube-apiserver rollout takes ~10 minutes, so the cleanups below only revert
+			// their cluster state and leave the waiting to this cleanup. Being registered first,
+			// it runs last, and a single rollout then covers every reverted change.
+			apiServerNeedsWait := false
+			DeferCleanup(func(ctx SpecContext) {
+				if !apiServerNeedsWait {
+					return
+				}
+				Step("Waiting for kube-apiserver to finish rolling out after reverting the cluster TLS configuration")
+				waitForAPIServerStable(ctx, cl)
+			})
+
 			// On hosted clusters, the APIServer resource is read-only and TLS settings cannot be changed,
 			// so skip all TLS profile tests. If the test run in a regular cluster, the APIServer resource is writable and the tests can run as normal.
 			Step("Checking if this is a Hosted Cluster")
@@ -399,9 +411,7 @@ spec:
 								fg.Spec.CustomNoUpgrade = &configv1.CustomFeatureGates{}
 								g.Expect(cl.Update(ctx, fg)).To(Succeed(), "Failed to disable TLSAdherence feature gate")
 							}).WithTimeout(30 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
-
-							Step("Waiting for kube-apiserver to finish rolling out after disabling the feature gate")
-							waitForAPIServerStable(ctx, cl)
+							apiServerNeedsWait = true
 							Success("TLSAdherence feature gate disabled")
 						})
 
@@ -458,9 +468,7 @@ spec:
 					}
 					g.Expect(cl.Update(ctx, apiServer)).To(Succeed(), "Failed to update APIServer TLS settings")
 				}).WithTimeout(30 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
-
-				Step("Waiting for kube-apiserver to finish rolling out after restoring TLS settings")
-				waitForAPIServerStable(ctx, cl)
+				apiServerNeedsWait = true
 			})
 
 			Step("Creating Istio")
@@ -745,10 +753,15 @@ func featureGateAttributesContains(attrs []configv1.FeatureGateAttributes, name 
 	})
 }
 
+// waitForAPIServerStable waits until the kube-apiserver ClusterOperator has finished
+// rolling out. A rollout triggered by a config change (FeatureGate, TLS profile, ...)
+// does not start immediately: for a short while after the change the operator still
+// reports Progressing=False, so a single check would return before the rollout even
+// began. We therefore require Progressing to stay False for a sustained period.
 func waitForAPIServerStable(ctx context.Context, cl client.Client) {
 	GinkgoHelper()
 
-	Eventually(func(g Gomega) {
+	notProgressing := func(g Gomega) {
 		co := &configv1.ClusterOperator{}
 		g.Expect(cl.Get(ctx, client.ObjectKey{Name: "kube-apiserver"}, co)).To(Succeed())
 		for _, cond := range co.Status.Conditions {
@@ -756,6 +769,14 @@ func waitForAPIServerStable(ctx context.Context, cl client.Client) {
 				g.Expect(cond.Status).To(Equal(configv1.ConditionFalse), "kube-apiserver should not be Progressing")
 			}
 		}
+	}
+
+	Eventually(func(g Gomega) {
+		notProgressing(g)
+
+		// Progressing=False may just mean the rollout hasn't started yet; make sure it holds.
+		g.Consistently(notProgressing).WithContext(ctx).
+			WithTimeout(2 * time.Minute).WithPolling(10 * time.Second).Should(Succeed())
 	}).WithTimeout(30*time.Minute).WithPolling(30*time.Second).Should(Succeed(),
 		"kube-apiserver should finish rolling out")
 }
@@ -798,6 +819,23 @@ func ensureTLSAdherence(ctx context.Context, cl client.Client, policy configv1.T
 	Step(fmt.Sprintf("Updating APIServer TLSAdherence from: %s to %s", apiServer.Spec.TLSAdherence, policy))
 	apiServer.Spec.TLSAdherence = policy
 	Expect(cl.Update(ctx, apiServer)).To(Succeed(), "Failed to update APIServer TLSAdherence")
+
+	// The apiservers silently prune spec.tlsAdherence while the TLSAdherence FeatureGate
+	// is not active on them yet (the Update only returns a warning header). Retry the write
+	// until it is actually persisted, otherwise the operator never sees a change and the
+	// restart check below would fail with a misleading message.
+	Step("Verifying the TLSAdherence change was persisted")
+	Eventually(func(g Gomega) {
+		fresh := &configv1.APIServer{}
+		g.Expect(cl.Get(ctx, apiServerKey, fresh)).To(Succeed(), "Failed to get APIServer")
+		if fresh.Spec.TLSAdherence != policy {
+			fresh.Spec.TLSAdherence = policy
+			g.Expect(cl.Update(ctx, fresh)).To(Succeed(), "Failed to update APIServer TLSAdherence")
+		}
+		g.Expect(fresh.Spec.TLSAdherence).To(Equal(policy),
+			"spec.tlsAdherence was dropped by the API server; the TLSAdherence feature gate is probably not active on the kube-apiservers yet")
+	}).WithTimeout(10*time.Minute).WithPolling(10*time.Second).Should(Succeed(),
+		"APIServer spec.tlsAdherence should be persisted")
 
 	Step("Waiting for operator to restart and be ready after TLSAdherence change")
 	Eventually(func(g Gomega) {
