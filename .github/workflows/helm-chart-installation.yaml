@@ -27,13 +27,18 @@ jobs:
     timeout-minutes: 60
 
     env:
-      # Repository that owns the release assets and the release-x.y branch under
-      # test. Defaults to the repository running the workflow. A fork without its
-      # own release pipeline can set the CHART_SOURCE_REPOSITORY variable (repo
-      # Settings -> Secrets and variables -> Actions -> Variables) to e.g.
-      # istio-ecosystem/sail-operator to exercise the gate against upstream
-      # artifacts while keeping index.yaml in the fork.
+      # Repository that owns the release assets referenced by index.yaml. Defaults
+      # to the repository running the workflow. A fork without its own release
+      # pipeline can set the CHART_SOURCE_REPOSITORY variable (repo Settings ->
+      # Secrets and variables -> Actions -> Variables) to e.g.
+      # istio-ecosystem/sail-operator to validate upstream artifacts while keeping
+      # index.yaml in the fork.
       CHART_SOURCE_REPOSITORY: ${{ vars.CHART_SOURCE_REPOSITORY || github.repository }}
+      # Repository providing the e2e suite (the release-x.y branch that gets
+      # checked out). Deliberately separate from CHART_SOURCE_REPOSITORY: when
+      # testing changes to the gate itself, the test code comes from your own
+      # fork while the chart artifacts still come from upstream.
+      TEST_SOURCE_REPOSITORY: ${{ vars.TEST_SOURCE_REPOSITORY || github.repository }}
 
     steps:
       - name: Set up Helm
@@ -195,7 +200,7 @@ jobs:
         if: ${{ steps.chart.outputs.should_test == 'true' }}
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
         with:
-          repository: ${{ env.CHART_SOURCE_REPOSITORY }}
+          repository: ${{ env.TEST_SOURCE_REPOSITORY }}
           ref: ${{ steps.chart.outputs.release_branch }}
           persist-credentials: false
 
@@ -236,7 +241,7 @@ jobs:
           done
 
           if [ ${#missing[@]} -ne 0 ]; then
-            echo "::error::Branch ${RELEASE_BRANCH} does not support: ${missing[*]}. Backport the e2e changes to ${RELEASE_BRANCH} before this chart can be gated."
+            echo "::error::${TEST_SOURCE_REPOSITORY}@${RELEASE_BRANCH} does not support: ${missing[*]}. Backport the e2e changes to that branch, or point the TEST_SOURCE_REPOSITORY variable at a repository whose ${RELEASE_BRANCH} has them."
             exit 1
           fi
 
