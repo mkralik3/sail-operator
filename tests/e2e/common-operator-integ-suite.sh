@@ -192,6 +192,55 @@ initialize_variables() {
   if [ "${OCP}" == "true" ]; then COMMAND="oc"; fi
 }
 
+# Pauses the worker and master MachineConfigPools to prevent node drains during tests
+# This is necessary because OpenShift certificate rotation triggers MachineConfig
+# regeneration ~50-60 minutes after cluster creation, which causes node drains
+pause_worker_mcp() {
+  if [ "${OCP}" != "true" ]; then
+    return 0
+  fi
+
+  # Check if MachineConfigPool API is available (not on HyperShift)
+  if ! oc api-resources --api-group=machineconfiguration.openshift.io 2>/dev/null | grep -q machineconfigpool; then
+    echo "MachineConfigPool API not available (likely HyperShift) - skipping MCP pause"
+    return 0
+  fi
+
+  echo "Pausing MachineConfigPools to prevent node drains during tests..."
+  if oc patch mcp/worker --type merge -p '{"spec":{"paused":true}}' 2>/dev/null; then
+    echo "Worker MachineConfigPool paused successfully"
+  else
+    echo "WARNING: Failed to pause worker MachineConfigPool - tests may be interrupted by node drains"
+  fi
+  if oc patch mcp/master --type merge -p '{"spec":{"paused":true}}' 2>/dev/null; then
+    echo "Master MachineConfigPool paused successfully"
+  else
+    echo "WARNING: Failed to pause master MachineConfigPool - tests may be interrupted by control plane drains"
+  fi
+  export MCP_PAUSED=true
+}
+
+# Unpauses the worker and master MachineConfigPools after tests complete
+# shellcheck disable=SC2329  # Function is invoked indirectly via trap
+unpause_worker_mcp() {
+  if [ "${MCP_PAUSED:-false}" != "true" ]; then
+    return 0
+  fi
+
+  echo "Unpausing MachineConfigPools..."
+  if oc patch mcp/worker --type merge -p '{"spec":{"paused":false}}' 2>/dev/null; then
+    echo "Worker MachineConfigPool unpaused successfully"
+  else
+    echo "WARNING: Failed to unpause worker MachineConfigPool - manual intervention may be required"
+  fi
+  if oc patch mcp/master --type merge -p '{"spec":{"paused":false}}' 2>/dev/null; then
+    echo "Master MachineConfigPool unpaused successfully"
+  else
+    echo "WARNING: Failed to unpause master MachineConfigPool - manual intervention may be required"
+  fi
+  export MCP_PAUSED=false
+}
+
 check_cluster_operators() {
   # This function is only relevant for OCP clusters
   if [ "${OCP}" != "true" ]; then
@@ -232,13 +281,18 @@ check_cluster_operators() {
 install_operator() {
   echo "Installing sail-operator (KUBECONFIG=${KUBECONFIG})"
   "${COMMAND}" create namespace "${NAMESPACE}"
+  local chart_path="${HELM_CHART_PATH:-${SOURCE_DIR}/chart}"
 
   # Optional resource overrides for constrained CI (e.g. Openshift Local on ubuntu-latest).
   # Defaults stay in chart/values.yaml; set OPERATOR_*_REQUEST / OPERATOR_*_LIMIT to tune.
   local helm_sets=(
-    --set "image=${HUB}/${IMAGE_BASE}:${TAG}"
     --set "operatorLogLevel=3"
   )
+  # Keep the chart's default image when testing a released chart archive. The
+  # local image override is only appropriate when installing the source chart.
+  if [ -z "${HELM_CHART_PATH:-}" ]; then
+    helm_sets+=(--set "image=${HUB}/${IMAGE_BASE}:${TAG}")
+  fi
   if [ -n "${OPERATOR_MEMORY_REQUEST:-}" ]; then
     helm_sets+=(--set "operator.resources.requests.memory=${OPERATOR_MEMORY_REQUEST}")
   fi
@@ -253,7 +307,8 @@ install_operator() {
   fi
 
   echo "Helm install overrides: ${helm_sets[*]}"
-  helm install sail-operator "${SOURCE_DIR}"/chart --namespace "${NAMESPACE}" "${helm_sets[@]}"
+  echo "Helm chart: ${chart_path}"
+  helm install sail-operator "${chart_path}" --namespace "${NAMESPACE}" "${helm_sets[@]}"
 }
 
 await_operator() {
@@ -295,6 +350,10 @@ uninstall_operator() {
 cleanup() {
   # Do not let cleanup errors affect the final exit code
   set +e
+
+  # Unpause worker MachineConfigPool if we paused it
+  unpause_worker_mcp
+
   if [ "${OLM}" != "true" ] && [ "${SKIP_DEPLOY}" != "true" ] && [ "${SKIP_CLEANUP}" != "true" ]; then
     if [ "${MULTICLUSTER}" == true ]; then
       KUBECONFIG="${KUBECONFIG}" uninstall_operator || true
@@ -414,6 +473,10 @@ fi
 # This is to avoid test failures due to cluster instability.
 check_cluster_operators
 
+# Pause worker MachineConfigPool to prevent node drains during tests
+# This is necessary because certificate rotation triggers MachineConfig updates ~50-60 min after cluster creation
+pause_worker_mcp
+
 set +e
 # Disable to avoid failing the test run before generating the report.xml
 # Capture the test exit code and allow cleanup via trap to run
@@ -430,7 +493,7 @@ fi
 # shellcheck disable=SC2086
 IMAGE="${HUB}/${IMAGE_BASE}:${TAG}" \
 go run github.com/onsi/ginkgo/v2/ginkgo -tags e2e \
---timeout 60m --junit-report="${ARTIFACTS}/report.xml" ${GINKGO_FLAGS:-} "${LABEL_FILTER_ARGS[@]}" "${WD}"/...
+--timeout "${GINKGO_TIMEOUT:-120m}" --junit-report="${ARTIFACTS}/report.xml" ${GINKGO_FLAGS:-} "${LABEL_FILTER_ARGS[@]}" "${WD}"/...
 TEST_EXIT_CODE=$?
 
 exit "${TEST_EXIT_CODE}"
