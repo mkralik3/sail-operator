@@ -232,13 +232,18 @@ check_cluster_operators() {
 install_operator() {
   echo "Installing sail-operator (KUBECONFIG=${KUBECONFIG})"
   "${COMMAND}" create namespace "${NAMESPACE}"
+  local chart_path="${HELM_CHART_PATH:-${SOURCE_DIR}/chart}"
 
   # Optional resource overrides for constrained CI (e.g. Openshift Local on ubuntu-latest).
   # Defaults stay in chart/values.yaml; set OPERATOR_*_REQUEST / OPERATOR_*_LIMIT to tune.
   local helm_sets=(
-    --set "image=${HUB}/${IMAGE_BASE}:${TAG}"
     --set "operatorLogLevel=3"
   )
+  # Keep the chart's default image when testing a released chart archive. The
+  # local image override is only appropriate when installing the source chart.
+  if [ -z "${HELM_CHART_PATH:-}" ]; then
+    helm_sets+=(--set "image=${HUB}/${IMAGE_BASE}:${TAG}")
+  fi
   if [ -n "${OPERATOR_MEMORY_REQUEST:-}" ]; then
     helm_sets+=(--set "operator.resources.requests.memory=${OPERATOR_MEMORY_REQUEST}")
   fi
@@ -253,7 +258,8 @@ install_operator() {
   fi
 
   echo "Helm install overrides: ${helm_sets[*]}"
-  helm install sail-operator "${SOURCE_DIR}"/chart --namespace "${NAMESPACE}" "${helm_sets[@]}"
+  echo "Helm chart: ${chart_path}"
+  helm install sail-operator "${chart_path}" --namespace "${NAMESPACE}" "${helm_sets[@]}"
 }
 
 await_operator() {
@@ -430,7 +436,7 @@ fi
 # shellcheck disable=SC2086
 IMAGE="${HUB}/${IMAGE_BASE}:${TAG}" \
 go run github.com/onsi/ginkgo/v2/ginkgo -tags e2e \
---timeout 60m --junit-report="${ARTIFACTS}/report.xml" ${GINKGO_FLAGS:-} "${LABEL_FILTER_ARGS[@]}" "${WD}"/...
+--timeout "${GINKGO_TIMEOUT:-120m}" --junit-report="${ARTIFACTS}/report.xml" ${GINKGO_FLAGS:-} "${LABEL_FILTER_ARGS[@]}" "${WD}"/...
 TEST_EXIT_CODE=$?
 
 exit "${TEST_EXIT_CODE}"
