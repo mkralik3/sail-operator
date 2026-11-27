@@ -1,0 +1,143 @@
+name: Release preparation
+
+# Manually triggered by the Release Manager on a release-X.Y branch after
+# the update-deps automator has merged a new Istio patch (versions.yaml).
+# Creates one PR with three commits:
+#   1) Bump VERSION + PREVIOUS_VERSION in Makefile.core.mk
+#   2) Pin istio Go deps + make gen (UPDATE_BRANCH=... PIN_MINOR=true ./tools/update_deps.sh, go get, go mod tidy)
+#   3) Generate CHANGELOG.md via hack/update-changelog.sh
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Target operator VERSION (e.g. 1.31.3). Default: auto (next patch of released VERSION, or current unreleased VERSION)"
+        required: false
+        type: string
+        default: ""
+      dry_run:
+        description: "Dry run — log actions, do not push or open PR"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  prep:
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref_name, 'release-')
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Compute target VERSION
+        id: ver
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION_OVERRIDE: ${{ inputs.version }}
+          REPO: ${{ github.repository }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          CURRENT=$(grep -E '^VERSION \?=' Makefile.core.mk | head -1 | sed -E 's/^VERSION \?=[[:space:]]*//')
+          echo "Current VERSION: ${CURRENT}"
+          if [[ -n "${VERSION_OVERRIDE}" ]]; then
+            TARGET="${VERSION_OVERRIDE}"
+          else
+            if gh release view "${CURRENT}" --repo "${REPO}" >/dev/null 2>&1; then
+              TARGET=$(echo "${CURRENT}" | awk -F. '{print $1"."$2"."$3+1}')
+            else
+              TARGET="${CURRENT}"
+            fi
+          fi
+          PREVIOUS="${CURRENT}"
+          ISTIO_VERSION=$(grep -E '^\s+version:' pkg/istioversion/versions.yaml | head -1 | sed -E 's/.*version:[[:space:]]*//')
+          echo "target=${TARGET}" >> "$GITHUB_OUTPUT"
+          echo "previous=${PREVIOUS}" >> "$GITHUB_OUTPUT"
+          echo "release_branch=${REF_NAME}" >> "$GITHUB_OUTPUT"
+          echo "istio_version=${ISTIO_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "TARGET=${TARGET} PREVIOUS=${PREVIOUS} ISTIO=${ISTIO_VERSION}"
+
+      - name: Configure git
+        run: |
+          git config user.name "sail-operator-bot"
+          git config user.email "sail-operator-bot@users.noreply.github.com"
+
+      - name: Prepare release PR (3 commits)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET: ${{ steps.ver.outputs.target }}
+          PREVIOUS: ${{ steps.ver.outputs.previous }}
+          RELEASE_BRANCH: ${{ steps.ver.outputs.release_branch }}
+          ISTIO_VERSION: ${{ steps.ver.outputs.istio_version }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          git fetch origin "${RELEASE_BRANCH}"
+          BRANCH="${RELEASE_BRANCH}-prep-${TARGET}"
+          git branch -D "${BRANCH}" 2>/dev/null || true
+          git checkout -b "${BRANCH}" "origin/${RELEASE_BRANCH}"
+
+          # --- Commit 1: VERSION + PREVIOUS_VERSION ---
+          sed -i -E "s/^(VERSION \?=).*/\1 ${TARGET}/" Makefile.core.mk
+          # PREVIOUS_VERSION is optional; set to previous released VERSION
+          if grep -qE '^PREVIOUS_VERSION' Makefile.core.mk; then
+            sed -i -E "s/^PREVIOUS_VERSION.*$/PREVIOUS_VERSION ?= ${PREVIOUS}/" Makefile.core.mk
+            if ! grep -q "^PREVIOUS_VERSION ?=" Makefile.core.mk; then
+              sed -i -E "s/^PREVIOUS_VERSION.*$/PREVIOUS_VERSION ?= ${PREVIOUS}/" Makefile.core.mk
+            fi
+          fi
+          git add Makefile.core.mk
+          git commit -s -m "Bump VERSION to ${TARGET}" -m "PREVIOUS_VERSION=${PREVIOUS}"
+
+          # --- Commit 2: pin Go deps + gen ---
+          UPDATE_BRANCH="${RELEASE_BRANCH}" PIN_MINOR=true ./tools/update_deps.sh || echo "update_deps.sh failed, continuing"
+          go get "istio.io/client-go@v${ISTIO_VERSION}" || true
+          go mod tidy
+          make gen
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            git add -A
+            git commit -s -m "Pin Istio Go deps to ${ISTIO_VERSION} and run make gen"
+          else
+            echo "No changes for pin/gen commit"
+          fi
+
+          # --- Commit 3: changelog ---
+          ./hack/update-changelog.sh "${TARGET}"
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            git add CHANGELOG.md changelog/
+            git commit -s -m "Generate changelog for ${TARGET}"
+          else
+            echo "No changelog fragments — skipping changelog commit"
+          fi
+
+          if [[ "${DRY_RUN}" == "true" ]]; then
+            echo "DRY RUN — would push ${BRANCH} and open PR"
+            git log --oneline -5
+            git diff "origin/${RELEASE_BRANCH}" --stat
+            exit 0
+          fi
+
+          git push -u origin "${BRANCH}"
+          gh pr create --repo "${REPO}" --base "${RELEASE_BRANCH}" --head "${BRANCH}" \
+            --title "Prepare release ${TARGET}" \
+            --body "Release prep for **${TARGET}** on \`${RELEASE_BRANCH}\` (Istio ${ISTIO_VERSION}).
+
+          Commits:
+          1. Bump \`VERSION\` → \`${TARGET}\`, \`PREVIOUS_VERSION\` → \`${PREVIOUS}\`
+          2. \`UPDATE_BRANCH=${RELEASE_BRANCH} PIN_MINOR=true ./tools/update_deps.sh\` + \`go get istio.io/client-go@v${ISTIO_VERSION}\` + \`go mod tidy\` + \`make gen\`
+          3. \`hack/update-changelog.sh ${TARGET}\`
+
+          Part of #2378 / #2514." \
+            --label "release"
